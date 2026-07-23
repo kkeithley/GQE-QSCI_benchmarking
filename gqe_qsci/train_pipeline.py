@@ -40,7 +40,9 @@ class TrainPipeline(pl.LightningModule):
         self.best_global_refined: QSCISampleResult | None = None
         self.buffer = ReplayBuffer(size=config.trainer.buffer_size)
         self._epoch_start_time: float | None = None
+        self._rollout_time = 0.0
         self._policy_update_time = 0.0
+        self._train_batch_start_time: float | None = None
         self._epoch_qsci_timing = QSCITiming()
 
     def on_fit_start(self):
@@ -53,7 +55,9 @@ class TrainPipeline(pl.LightningModule):
 
     def on_train_epoch_start(self):
         self._epoch_start_time = perf_counter()
+        self._rollout_time = 0.0
         self._policy_update_time = 0.0
+        self._train_batch_start_time = None
         self._epoch_qsci_timing = QSCITiming()
         qsci_result = self.collect_rollout(log=True)
         self._epoch_qsci_timing = qsci_result.timing
@@ -75,9 +79,10 @@ class TrainPipeline(pl.LightningModule):
             component_3 = self._epoch_qsci_timing.sqd_diagonalization
             component_4 = self._epoch_qsci_timing.local_refinement
             component_5 = self._epoch_qsci_timing.global_refinement
-            component_1 = epoch_total_time - (component_2 + component_3 + component_4 + component_5)
+            component_1 = self._rollout_time + self._policy_update_time
             timing_metrics = {
                 "timing/epoch/rollout_plus_policy_updates": component_1,
+                "timing/epoch/rollout_only": self._rollout_time,
                 "timing/epoch/circuit_sampling": component_2,
                 "timing/epoch/sqd_diagonalization": component_3,
                 "timing/epoch/local_refinement": component_4,
@@ -98,6 +103,7 @@ class TrainPipeline(pl.LightningModule):
         super().on_train_epoch_end()
 
     def collect_rollout(self, log=False):
+        rollout_total_start = perf_counter()
         state = {
             "idx": torch.zeros(
                 (self.config.trainer.num_samples, 1),
@@ -133,11 +139,20 @@ class TrainPipeline(pl.LightningModule):
                 self.best_global_refined = qsci_result.global_refined
 
         self.scheduler.update(energies=energies)
+        self._rollout_time += perf_counter() - rollout_total_start - qsci_result.timing.total
         return qsci_result
 
+    def on_train_batch_start(self, batch, batch_idx):
+        self._train_batch_start_time = perf_counter()
+        return super().on_train_batch_start(batch, batch_idx)
+
+    def on_train_batch_end(self, outputs, batch, batch_idx):
+        if self._train_batch_start_time is not None:
+            self._policy_update_time += perf_counter() - self._train_batch_start_time
+            self._train_batch_start_time = None
+        return super().on_train_batch_end(outputs, batch, batch_idx)
 
     def training_step(self, batch, _):
-        step_start = perf_counter()
         for k, v in batch.items():
             if torch.is_tensor(v):
                 batch[k] = v.to(self.device)
@@ -159,7 +174,6 @@ class TrainPipeline(pl.LightningModule):
             prog_bar=False,
             logger=True,
         )
-        self._policy_update_time += perf_counter() - step_start
         return loss
 
     def update_state(self, state, next_token):

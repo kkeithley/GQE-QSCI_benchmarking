@@ -3,7 +3,7 @@ from typing import Any, Mapping
 
 import numpy as np
 
-from gqe_qsci.qsci.schema import QSCIResult, QSCISampleResult
+from gqe_qsci.qsci.schema import QSCIResult, QSCISampleResult, QSCITiming
 
 
 class Logger:
@@ -61,6 +61,18 @@ def _(result: QSCISampleResult, *, prefix: str = "", ref_energy: dict[str, float
 
 
 @extract_metrics.register
+def _(result: QSCITiming, *, prefix: str = "", ref_energy: dict[str, float] | None = None) -> dict[str, float]:
+    _ = ref_energy
+    return {
+        _prefix_key("timing/circuit_sampling", prefix): result.circuit_sampling,
+        _prefix_key("timing/sqd_diagonalization", prefix): result.sqd_diagonalization,
+        _prefix_key("timing/local_refinement", prefix): result.local_refinement,
+        _prefix_key("timing/global_refinement", prefix): result.global_refinement,
+        _prefix_key("timing/total_qsci", prefix): result.total,
+    }
+
+
+@extract_metrics.register
 def _(result: QSCIResult, *, prefix: str = "", ref_energy: dict[str, float] | None = None) -> dict[str, float]:
     if len(result.samples) == 0:
         return {}
@@ -73,4 +85,5 @@ def _(result: QSCIResult, *, prefix: str = "", ref_energy: dict[str, float] | No
     d[_prefix_key("subspace_dim/max", prefix)] = min(result.subspace_dim)
     d[_prefix_key("cx_count/max", prefix)] = max(result.cx_counts)
     d[_prefix_key("total_gates/max", prefix)] = max(result.total_gates)
+    d.update(extract_metrics(result.timing, prefix=prefix, ref_energy=ref_energy))
     return d
