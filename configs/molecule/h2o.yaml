@@ -1,0 +1,12 @@
+_target_: gqe_qsci.molecule.PySCFMolecule
+geometry:
+  type: custom
+  geometry: [['H', [-0.7586, 0.0, 0.587]],
+            ['O', [0.0, 0.0, 0.0]],
+            ['H', [0.7586, 0.0, 0.587]]]
+basis: 'sto-3g'
+nelecas: 8
+norbcas: 6
+spin: 0
+charge: 0
+
