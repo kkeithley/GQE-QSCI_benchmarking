@@ -2,11 +2,12 @@ import numpy as np
 import torch
 import pyci
 from typing import Any
+from time import perf_counter
 
 from gqe_qsci.molecule import PySCFMolecule
 from gqe_qsci.gqe.sampler import Sampler
 from gqe_qsci.gqe.operator_pool import OperatorPool
-from gqe_qsci.qsci.schema import QSCIResult, QSCISampleResult
+from gqe_qsci.qsci.schema import QSCIResult, QSCISampleResult, QSCITiming
 from gqe_qsci.qsci.subspace import DeterminantSubspace
 from gqe_qsci.qsci.refine.pipeline import RefinePipeline
 from gqe_qsci.qsci.statevector import as_scivector, SCIVector
@@ -55,16 +56,22 @@ class QSCIPipeline:
         self,
         states: dict[str, torch.Tensor],
     ) -> QSCIResult:
+        sampling_start = perf_counter()
         sampled_counts = self.sampler.run(states)
+        circuit_sampling_time = perf_counter() - sampling_start
+
         samples = []
         sci_states = []
+        sqd_diagonalization_time = 0.0
 
         for seq, counts in zip(states["idx"].tolist(), sampled_counts):
             circuit_gate_numbers = self.operator_pool.get_gate_count(seq)
             subspace = DeterminantSubspace.from_cudaq_sample_result(counts)
             valid_subspace = subspace.post_select_by_nelec(self.nelec)
             enlarged_subspace = valid_subspace.enlarge(max_dim=self.max_dim, method=self.enlarge_method)
+            diag_start = perf_counter()
             energy, ci = self.diagonalize(enlarged_subspace)
+            sqd_diagonalization_time += perf_counter() - diag_start
             sci_states.append(ci)
 
             samples.append(
@@ -80,8 +87,10 @@ class QSCIPipeline:
             )
         
         # local refinement
+        local_refinement_start = perf_counter()
         local_refined_subspace = self.subspace_refiner.process(sci_states, max_dim=self.max_dim)
         local_refined_energy, local_refined_ci = self.diagonalize(local_refined_subspace)
+        local_refinement_time = perf_counter() - local_refinement_start
         local_refined_result = QSCISampleResult(
             seq=None,
             energy=local_refined_energy,
@@ -93,6 +102,7 @@ class QSCIPipeline:
         )
 
         # global refinement
+        global_refinement_start = perf_counter()
         global_refined_energy: float | None = None
         if self.global_refined_scistates is None:
             self.global_refined_scistates = local_refined_ci
@@ -111,9 +121,16 @@ class QSCIPipeline:
                 cx_count=None,
                 total_gates=None,
             )
+        global_refinement_time = perf_counter() - global_refinement_start
 
         return QSCIResult(
             samples=tuple(samples),
             local_refined=local_refined_result,
             global_refined=global_refined_result,
+            timing=QSCITiming(
+                circuit_sampling=circuit_sampling_time,
+                sqd_diagonalization=sqd_diagonalization_time,
+                local_refinement=local_refinement_time,
+                global_refinement=global_refinement_time,
+            ),
         )

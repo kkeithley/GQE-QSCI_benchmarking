@@ -15,9 +15,10 @@ import numpy as np
 from torch.utils.data import DataLoader
 import random
 import pytorch_lightning as pl
+from time import perf_counter
 
 from gqe_qsci.gqe.buffer import ReplayBuffer, BufferDataset
-from gqe_qsci.qsci.schema import QSCISampleResult
+from gqe_qsci.qsci.schema import QSCISampleResult, QSCITiming
 from gqe_qsci.qsci.pipeline import as_scivector
 
 
@@ -38,6 +39,9 @@ class TrainPipeline(pl.LightningModule):
         self.best_local_refined: QSCISampleResult | None = None
         self.best_global_refined: QSCISampleResult | None = None
         self.buffer = ReplayBuffer(size=config.trainer.buffer_size)
+        self._epoch_start_time: float | None = None
+        self._policy_update_time = 0.0
+        self._epoch_qsci_timing = QSCITiming()
 
     def on_fit_start(self):
         run = self.logger.experiment
@@ -48,7 +52,11 @@ class TrainPipeline(pl.LightningModule):
         super().on_fit_start()
 
     def on_train_epoch_start(self):
+        self._epoch_start_time = perf_counter()
+        self._policy_update_time = 0.0
+        self._epoch_qsci_timing = QSCITiming()
         qsci_result = self.collect_rollout(log=True)
+        self._epoch_qsci_timing = qsci_result.timing
         log_inputs = [
             {"result": qsci_result, "prefix": "GQE-optimized"},
             {"result": self.best_sample, "prefix": "GQE-optimized(best_so_far)"},
@@ -61,6 +69,32 @@ class TrainPipeline(pl.LightningModule):
         super().on_train_epoch_start()
     
     def on_train_epoch_end(self):
+        if self._epoch_start_time is not None:
+            epoch_total_time = perf_counter() - self._epoch_start_time
+            component_2 = self._epoch_qsci_timing.circuit_sampling
+            component_3 = self._epoch_qsci_timing.sqd_diagonalization
+            component_4 = self._epoch_qsci_timing.local_refinement
+            component_5 = self._epoch_qsci_timing.global_refinement
+            component_1 = epoch_total_time - (component_2 + component_3 + component_4 + component_5)
+            timing_metrics = {
+                "timing/epoch/rollout_plus_policy_updates": component_1,
+                "timing/epoch/circuit_sampling": component_2,
+                "timing/epoch/sqd_diagonalization": component_3,
+                "timing/epoch/local_refinement": component_4,
+                "timing/epoch/global_refinement": component_5,
+                "timing/epoch/total": epoch_total_time,
+                "timing/epoch/policy_updates_only": self._policy_update_time,
+            }
+            self.log_dict(timing_metrics, on_step=False, on_epoch=True, prog_bar=False, logger=True)
+            print(
+                "Epoch timing (s): "
+                f"1 rollout+policy={component_1:.6f}, "
+                f"2 sampling={component_2:.6f}, "
+                f"3 sqd_diagonalization={component_3:.6f}, "
+                f"4 local_refinement={component_4:.6f}, "
+                f"5 global_refinement={component_5:.6f}, "
+                f"6 total={epoch_total_time:.6f}"
+            )
         super().on_train_epoch_end()
 
     def collect_rollout(self, log=False):
@@ -103,6 +137,7 @@ class TrainPipeline(pl.LightningModule):
 
 
     def training_step(self, batch, _):
+        step_start = perf_counter()
         for k, v in batch.items():
             if torch.is_tensor(v):
                 batch[k] = v.to(self.device)
@@ -124,6 +159,7 @@ class TrainPipeline(pl.LightningModule):
             prog_bar=False,
             logger=True,
         )
+        self._policy_update_time += perf_counter() - step_start
         return loss
 
     def update_state(self, state, next_token):

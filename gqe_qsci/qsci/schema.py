@@ -2,6 +2,23 @@ from dataclasses import dataclass
 
 
 @dataclass(frozen=True, slots=True)
+class QSCITiming:
+    circuit_sampling: float = 0.0
+    sqd_diagonalization: float = 0.0
+    local_refinement: float = 0.0
+    global_refinement: float = 0.0
+
+    @property
+    def total(self) -> float:
+        return (
+            self.circuit_sampling
+            + self.sqd_diagonalization
+            + self.local_refinement
+            + self.global_refinement
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class QSCISampleResult:
     seq: tuple[int, ...] | None
     energy: float
@@ -17,6 +34,7 @@ class QSCIResult:
     samples: tuple[QSCISampleResult, ...]
     local_refined: QSCISampleResult | None = None
     global_refined: QSCISampleResult | None = None
+    timing: QSCITiming = QSCITiming()
 
     @property
     def energies(self) -> list[float]:
